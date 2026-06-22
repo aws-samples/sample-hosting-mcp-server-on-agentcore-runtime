@@ -28,15 +28,15 @@ from bedrock_agentcore_starter_toolkit import Runtime
 from boto3.session import Session
 
 # Configuration constants
-COGNITO_POOL_NAME = 'LongRunningMCPServerPool'
-COGNITO_CLIENT_NAME = 'LongRunningMCPServerClient'
-AGENT_NAME = 'long_running_mcp_server'
+COGNITO_POOL_NAME = 'LongRunningMCPServerPoolOptimized'
+COGNITO_CLIENT_NAME = 'LongRunningMCPServerClientOptimized'
+AGENT_NAME = 'long_running_mcp_server_optimized'
 REQUIRED_FILES = ['long_running_mcp_server.py', 'requirements.txt']
 
 # AWS resource names
-SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server/cognito/credentials'
-DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server/deploy/credentials'
-SSM_PARAMETER_NAME = '/long_running_mcp_server/runtime/agent_arn'
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_optimized/cognito/credentials'
+DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server_optimized/deploy/credentials'
+SSM_PARAMETER_NAME = '/long_running_mcp_server_optimized/runtime/agent_arn'
 
 
 def get_credentials_from_env() -> tuple:
@@ -234,8 +234,8 @@ def deploy_and_monitor_runtime(agentcore_runtime: Runtime) -> object:
     print("🚀 Launching long-running MCP server to AgentCore Runtime...")
     print("⏳ This may take several minutes due to scientific library dependencies...")
     
-    # Launch the runtime
-    launch_result = agentcore_runtime.launch()
+    # Launch the runtime (auto-update if agent already exists from baseline)
+    launch_result = agentcore_runtime.launch(auto_update_on_conflict=True)
     print("✓ Launch initiated")
     print(f"Agent ARN: {launch_result.agent_arn}")
     print(f"Agent ID: {launch_result.agent_id}")

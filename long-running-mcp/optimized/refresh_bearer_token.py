@@ -41,9 +41,9 @@ import boto3
 from boto3.session import Session
 
 # Configuration constants
-SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server/cognito/credentials'
-DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server/deploy/credentials'
-SSM_PARAMETER_NAME = '/long_running_mcp_server/runtime/agent_arn'
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_optimized/cognito/credentials'
+DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server_optimized/deploy/credentials'
+SSM_PARAMETER_NAME = '/long_running_mcp_server_optimized/runtime/agent_arn'
 TOKEN_REFRESH_BUFFER_HOURS = 2  # Refresh token 2 hours before expiry (for 12-hour tokens)
 
 

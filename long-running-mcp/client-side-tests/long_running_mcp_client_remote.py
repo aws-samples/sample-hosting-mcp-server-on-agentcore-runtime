@@ -33,8 +33,8 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 # Configuration constants
-SSM_PARAMETER_NAME = '/long_running_mcp_server/runtime/agent_arn'
-SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server/cognito/credentials'
+SSM_PARAMETER_NAME = '/long_running_mcp_server_baseline/runtime/agent_arn'
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_baseline/cognito/credentials'
 CONNECTION_TIMEOUT = 1800  # 30 minutes for long-running operations
 AGENTCORE_BASE_URL = "https://bedrock-agentcore.{region}.amazonaws.com"
 

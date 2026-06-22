@@ -269,3 +269,6 @@ test_local_*
 Dockerfile
 *.json
 .dockerignore
+
+# Optimization results (generated reports - except published results)
+optimization/results/optimization_report_*.json

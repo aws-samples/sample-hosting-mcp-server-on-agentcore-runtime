@@ -1,40 +1,42 @@
 #!/usr/bin/env python3
 """
-MCP Server AgentCore Runtime Deployment Script
+Long-Running MCP Server AgentCore Runtime Deployment Script
 
-This script automates the deployment of an MCP (Model Context Protocol) server 
+This script automates the deployment of the long-running MCP server 
 to Amazon Bedrock AgentCore Runtime with Cognito authentication.
 
 Features:
 - Creates Cognito User Pool for authentication
-- Deploys MCP server to AgentCore Runtime
+- Deploys long-running MCP server to AgentCore Runtime
 - Stores credentials in AWS Secrets Manager and Parameter Store
 - Monitors deployment status
+- Optimized for computational workloads
 
 Requirements:
-- long_running_mcp_server.py: The MCP server implementation
-- requirements.txt: Python dependencies
+- long_running_mcp_server.py: The long-running MCP server implementation
+- requirements.txt: Python dependencies including scientific libraries
 - AWS credentials configured
 """
 
+import json
 import os
 import sys
 import time
-import json
+
 import boto3
-from boto3.session import Session
 from bedrock_agentcore_starter_toolkit import Runtime
+from boto3.session import Session
 
 # Configuration constants
-COGNITO_POOL_NAME = 'MCPServerPool'
-COGNITO_CLIENT_NAME = 'MCPServerPoolClient'
-AGENT_NAME = 'mcp_server_agentcore'
-REQUIRED_FILES = ['simple_mcp_server.py', 'requirements.txt']
+COGNITO_POOL_NAME = 'LongRunningMCPServerPoolBaseline'
+COGNITO_CLIENT_NAME = 'LongRunningMCPServerClientBaseline'
+AGENT_NAME = 'long_running_mcp_server_baseline'
+REQUIRED_FILES = ['long_running_mcp_server.py', 'requirements.txt']
 
 # AWS resource names
-SECRETS_MANAGER_SECRET_NAME = 'mcp_server/cognito/credentials'
-DEPLOY_CREDENTIALS_SECRET_NAME = 'mcp_server/deploy/credentials'
-SSM_PARAMETER_NAME = '/mcp_server/runtime/agent_arn'
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_baseline/cognito/credentials'
+DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server_baseline/deploy/credentials'
+SSM_PARAMETER_NAME = '/long_running_mcp_server_baseline/runtime/agent_arn'
 
 
 def get_credentials_from_env() -> tuple:
@@ -51,13 +53,7 @@ def get_credentials_from_env() -> tuple:
 
 def setup_cognito_user_pool(region: str, username: str, password: str) -> dict:
     """
-    Create and configure a Cognito User Pool for MCP server authentication.
-    
-    This function:
-    1. Creates a Cognito User Pool with password policy
-    2. Creates an app client for authentication
-    3. Creates a test user with permanent password
-    4. Authenticates the user to get an access token
+    Create and configure a Cognito User Pool for long-running MCP server authentication.
     
     Args:
         region (str): AWS region for Cognito resources
@@ -70,7 +66,7 @@ def setup_cognito_user_pool(region: str, username: str, password: str) -> dict:
     Raises:
         Exception: If Cognito setup fails
     """
-    print("🔧 Setting up Amazon Cognito user pool...")
+    print("🔧 Setting up Amazon Cognito user pool for long-running MCP server...")
     
     cognito_client = boto3.client('cognito-idp', region_name=region)
     
@@ -86,7 +82,15 @@ def setup_cognito_user_pool(region: str, username: str, password: str) -> dict:
                     'RequireNumbers': True,
                     'RequireSymbols': True
                 }
-            }
+            },
+            Schema=[
+                {
+                    'Name': 'email',
+                    'AttributeDataType': 'String',
+                    'Required': False,
+                    'Mutable': True
+                }
+            ]
         )
         pool_id = user_pool_response['UserPool']['Id']
         print(f"✓ Created User Pool: {pool_id}")
@@ -99,7 +103,15 @@ def setup_cognito_user_pool(region: str, username: str, password: str) -> dict:
             ExplicitAuthFlows=[
                 'ALLOW_USER_PASSWORD_AUTH',
                 'ALLOW_REFRESH_TOKEN_AUTH'
-            ]
+            ],
+            TokenValidityUnits={
+                'AccessToken': 'hours',
+                'IdToken': 'hours',
+                'RefreshToken': 'days'
+            },
+            AccessTokenValidity=12,  # 12 hours for long-running operations
+            IdTokenValidity=12,      # 12 hours
+            RefreshTokenValidity=30  # 30 days
         )
         client_id = app_client_response['UserPoolClient']['ClientId']
         print(f"✓ Created App Client: {client_id}")
@@ -152,6 +164,7 @@ def setup_cognito_user_pool(region: str, username: str, password: str) -> dict:
         raise
 
 
+
 def validate_required_files() -> None:
     """
     Validate that all required files exist in the current directory.
@@ -170,7 +183,7 @@ def validate_required_files() -> None:
 
 def configure_agentcore_runtime(region: str, cognito_config: dict) -> Runtime:
     """
-    Configure the AgentCore Runtime with MCP server settings.
+    Configure the AgentCore Runtime with long-running MCP server settings.
     
     Args:
         region (str): AWS region for deployment
@@ -179,7 +192,7 @@ def configure_agentcore_runtime(region: str, cognito_config: dict) -> Runtime:
     Returns:
         Runtime: Configured AgentCore Runtime instance
     """
-    print("⚙️ Configuring AgentCore Runtime...")
+    print("⚙️ Configuring AgentCore Runtime for long-running operations...")
     
     agentcore_runtime = Runtime()
     
@@ -191,9 +204,9 @@ def configure_agentcore_runtime(region: str, cognito_config: dict) -> Runtime:
         }
     }
     
-    # Configure the runtime
+    # Configure the runtime with optimizations for long-running operations
     response = agentcore_runtime.configure(
-        entrypoint="simple_mcp_server.py",
+        entrypoint="long_running_mcp_server.py",
         auto_create_execution_role=True,
         auto_create_ecr=True,
         requirements_file="requirements.txt",
@@ -203,13 +216,14 @@ def configure_agentcore_runtime(region: str, cognito_config: dict) -> Runtime:
         agent_name=AGENT_NAME
     )
     
-    print("✓ AgentCore Runtime configured")
+    
+    print("✓ AgentCore Runtime configured for long-running operations")
     return agentcore_runtime
 
 
 def deploy_and_monitor_runtime(agentcore_runtime: Runtime) -> object:
     """
-    Deploy the MCP server to AgentCore Runtime and monitor until ready.
+    Deploy the long-running MCP server to AgentCore Runtime and monitor until ready.
     
     Args:
         agentcore_runtime (Runtime): Configured runtime instance
@@ -217,8 +231,8 @@ def deploy_and_monitor_runtime(agentcore_runtime: Runtime) -> object:
     Returns:
         object: Launch result containing agent ARN and ID
     """
-    print("🚀 Launching MCP server to AgentCore Runtime...")
-    print("⏳ This may take several minutes...")
+    print("🚀 Launching long-running MCP server to AgentCore Runtime...")
+    print("⏳ This may take several minutes due to scientific library dependencies...")
     
     # Launch the runtime
     launch_result = agentcore_runtime.launch()
@@ -226,25 +240,35 @@ def deploy_and_monitor_runtime(agentcore_runtime: Runtime) -> object:
     print(f"Agent ARN: {launch_result.agent_arn}")
     print(f"Agent ID: {launch_result.agent_id}")
     
-    # Monitor deployment status
+    # Monitor deployment status with extended timeout for computational dependencies
     print("📊 Monitoring deployment status...")
     status_response = agentcore_runtime.status()
     status = status_response.endpoint['status']
     print(f"Initial status: {status}")
     
-    # Wait for final status
+    # Wait for final status with longer intervals due to heavy dependencies
     end_statuses = ['READY', 'CREATE_FAILED', 'DELETE_FAILED', 'UPDATE_FAILED']
+    wait_time = 15  # Start with 15 seconds
+    max_wait_time = 60  # Max 60 seconds between checks
+    
     while status not in end_statuses:
-        print(f"Status: {status} - waiting...")
-        time.sleep(10)
+        print(f"Status: {status} - waiting {wait_time}s...")
+        time.sleep(wait_time)
+        
         status_response = agentcore_runtime.status()
         status = status_response.endpoint['status']
+        
+        # Gradually increase wait time for long deployments
+        wait_time = min(wait_time + 5, max_wait_time)
     
     # Report final status
     if status == 'READY':
-        print("✅ AgentCore Runtime is READY!")
+        print("✅ AgentCore Runtime is READY for long-running operations!")
     else:
         print(f"⚠️ AgentCore Runtime status: {status}")
+        # Get more details if deployment failed
+        if 'CREATE_FAILED' in status:
+            print("💡 Check CloudWatch logs for detailed error information")
     
     return launch_result
 
@@ -269,7 +293,7 @@ def store_configuration(region: str, cognito_config: dict, launch_result: object
     try:
         secrets_client.create_secret(
             Name=SECRETS_MANAGER_SECRET_NAME,
-            Description='Cognito credentials for MCP server',
+            Description='Cognito credentials for long-running MCP server',
             SecretString=json.dumps(cognito_config)
         )
         print("✓ Cognito credentials stored in Secrets Manager")
@@ -285,7 +309,7 @@ def store_configuration(region: str, cognito_config: dict, launch_result: object
     try:
         secrets_client.create_secret(
             Name=DEPLOY_CREDENTIALS_SECRET_NAME,
-            Description='Deploy credentials for MCP server Cognito user',
+            Description='Deploy credentials for long-running MCP server Cognito user',
             SecretString=json.dumps(deploy_creds)
         )
         print("✓ Deploy credentials stored in Secrets Manager")
@@ -301,18 +325,37 @@ def store_configuration(region: str, cognito_config: dict, launch_result: object
         Name=SSM_PARAMETER_NAME,
         Value=launch_result.agent_arn,
         Type='String',
-        Description='Agent ARN for MCP server',
+        Description='Agent ARN for long-running MCP server',
         Overwrite=True
     )
     print("✓ Agent ARN stored in Parameter Store")
+    
+    # Store additional metadata
+    metadata = {
+        "agent_id": launch_result.agent_id,
+        "agent_arn": launch_result.agent_arn,
+        "deployment_time": time.time(),
+        "server_type": "long_running_computational",
+        "max_payload_mb": 10,
+        "max_duration_minutes": 30
+    }
+    
+    ssm_client.put_parameter(
+        Name=f'/long_running_mcp_server/metadata',
+        Value=json.dumps(metadata),
+        Type='String',
+        Description='Metadata for long-running MCP server',
+        Overwrite=True
+    )
+    print("✓ Server metadata stored in Parameter Store")
 
 
 def main():
     """
     Main deployment function that orchestrates the entire process.
     """
-    print("🎯 Starting MCP Server AgentCore Runtime Deployment")
-    print("=" * 60)
+    print("🎯 Starting Long-Running MCP Server AgentCore Runtime Deployment")
+    print("=" * 70)
     
     try:
         # Initialize AWS session and get region
@@ -339,18 +382,23 @@ def main():
         store_configuration(region, cognito_config, launch_result, username, password)
         
         # Success summary
-        print("\n" + "=" * 60)
-        print("🎉 Deployment completed successfully!")
+        print("\n" + "=" * 70)
+        print("🎉 Long-Running MCP Server Deployment completed successfully!")
         print(f"📍 Agent ARN: {launch_result.agent_arn}")
         print(f"🔑 Credentials stored in: {SECRETS_MANAGER_SECRET_NAME}")
         print(f"📋 Agent ARN stored in: {SSM_PARAMETER_NAME}")
-        print("=" * 60)
+        print("💡 Server optimized for:")
+        print("   - Large payloads up to 3MB")
+        print("   - Long-running operations up to 30 minutes")
+        print("   - Computational workloads with scientific libraries")
+        print("=" * 70)
         
     except Exception as e:
         print(f"\n❌ Deployment failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Simple MCP Server Sequential vs Concurrent Comparison Test
+Sequential vs Parallel Concurrency Comparison Test
 
-This script runs the same operations first sequentially, then concurrently,
+This script runs the same operations first sequentially, then in parallel,
 and provides comparative analysis of the results.
 
 Concurrent requests are batched at 25 per batch to respect the AgentCore
@@ -12,6 +12,7 @@ Runtime InvokeAgentRuntime API rate limit of 25 TPS.
 import asyncio
 import json
 import math
+import sys
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -23,9 +24,9 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 # Configuration
-SSM_PARAMETER_NAME = '/mcp_server/runtime/agent_arn'
-SECRETS_MANAGER_SECRET_NAME = 'mcp_server/cognito/credentials'
-CONNECTION_TIMEOUT = 30
+SSM_PARAMETER_NAME = '/long_running_mcp_server_baseline/runtime/agent_arn'
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_baseline/cognito/credentials'
+CONNECTION_TIMEOUT = 2400
 AGENTCORE_BASE_URL = "https://bedrock-agentcore.{region}.amazonaws.com"
 MAX_CONCURRENT_BATCH = 25  # AgentCore InvokeAgentRuntime API rate limit
 
@@ -59,17 +60,27 @@ def get_credentials() -> Credentials:
     return Credentials(agent_arn, secret['bearer_token'], region)
 
 
-async def single_request(credentials: Credentials, test_id: str, max_retries: int = 5) -> Tuple[str, bool, float, str]:
-    """Single MCP server invocation - list tools, with exponential backoff retry."""
+def build_tests(num_tests: int) -> List[Dict]:
+    """Build test configurations."""
+    return [
+        {"tool": "matrix_operations", "args": {"operation": "multiply", "matrix_size": 200, "duration_minutes": 0.5}, "id": f"test_{i+1}"}
+        for i in range(num_tests)
+    ]
+
+
+async def invoke_tool(credentials: Credentials, tool: str, args: Dict, test_id: str, max_retries: int = 5) -> Tuple[str, bool, float, str]:
+    """Single MCP server invocation with retry on transient errors."""
     start = time.time()
     for attempt in range(max_retries + 1):
         try:
-            timeout = timedelta(seconds=CONNECTION_TIMEOUT)
+            timeout = timedelta(seconds=max(CONNECTION_TIMEOUT, args.get('duration_minutes', 1.0) * 60 + 120))
             async with streamablehttp_client(credentials.mcp_url, credentials.headers, timeout=timeout, terminate_on_close=False) as (r, w, _):
                 async with ClientSession(r, w) as session:
                     await session.initialize()
-                    await session.list_tools()
-                    return test_id, True, time.time() - start, ""
+                    result = await session.call_tool(name=tool, arguments=args)
+                    elapsed = time.time() - start
+                    success = result.content and len(result.content) > 0
+                    return test_id, success, elapsed, ""
         except Exception as e:
             err_str = str(e)
             retryable = "429" in err_str or "ConnectError" in type(e).__name__ or "nodename" in err_str
@@ -95,35 +106,35 @@ def _compute_stats(results: List[Dict]) -> Dict:
     }
 
 
-async def run_sequential(credentials: Credentials, num_requests: int) -> Dict:
+async def run_sequential(credentials: Credentials, tests: List[Dict]) -> Dict:
     """Run tests one after another."""
     print(f"\n{'='*60}")
-    print(f"🔄 SEQUENTIAL TEST ({num_requests} requests)")
+    print(f"🔄 SEQUENTIAL TEST ({len(tests)} requests)")
     print(f"{'='*60}")
     
     start = time.time()
     results = []
     
-    for i in range(num_requests):
-        print(f"   [{i+1}/{num_requests}]...", end=" ", flush=True)
-        test_id, success, elapsed, error = await single_request(credentials, f"seq_{i+1}")
+    for i, tc in enumerate(tests):
+        print(f"   [{i+1}/{len(tests)}]...", end=" ", flush=True)
+        test_id, success, elapsed, error = await invoke_tool(credentials, tc["tool"], tc["args"], tc["id"])
         results.append({"id": test_id, "success": success, "time": elapsed, "error": error})
         print(f"{'✅' if success else '❌'} {elapsed*1000:.1f}ms")
     
     total_time = time.time() - start
     stats = _compute_stats(results)
     
-    print(f"\n   📊 Total: {total_time:.2f}s | Success: {stats['successful']}/{num_requests}")
+    print(f"\n   📊 Total: {total_time:.2f}s | Success: {stats['successful']}/{len(tests)}")
     
     return {"mode": "Sequential", "total_time": total_time, **stats}
 
 
-async def run_concurrent(credentials: Credentials, num_requests: int) -> Tuple[Dict, List[Dict]]:
+async def run_concurrent(credentials: Credentials, tests: List[Dict]) -> Tuple[Dict, List[Dict]]:
     """Run tests concurrently in batches of MAX_CONCURRENT_BATCH to respect API rate limits."""
-    num_batches = math.ceil(num_requests / MAX_CONCURRENT_BATCH)
+    num_batches = math.ceil(len(tests) / MAX_CONCURRENT_BATCH)
     
     print(f"\n{'='*60}")
-    print(f"⚡ CONCURRENT TEST ({num_requests} requests in {num_batches} batch(es) of ≤{MAX_CONCURRENT_BATCH})")
+    print(f"⚡ CONCURRENT TEST ({len(tests)} requests in {num_batches} batch(es) of ≤{MAX_CONCURRENT_BATCH})")
     print(f"{'='*60}")
     
     overall_start = time.time()
@@ -132,23 +143,19 @@ async def run_concurrent(credentials: Credentials, num_requests: int) -> Tuple[D
     
     for batch_idx in range(num_batches):
         batch_start_idx = batch_idx * MAX_CONCURRENT_BATCH
-        batch_size = min(MAX_CONCURRENT_BATCH, num_requests - batch_start_idx)
+        batch_tests = tests[batch_start_idx:batch_start_idx + MAX_CONCURRENT_BATCH]
         
-        print(f"\n   --- Batch {batch_idx+1}/{num_batches} ({batch_size} requests) ---")
+        print(f"\n   --- Batch {batch_idx+1}/{num_batches} ({len(batch_tests)} requests) ---")
         
         batch_start = time.time()
-        tasks = [
-            single_request(credentials, f"conc_{batch_start_idx + i + 1}")
-            for i in range(batch_size)
-        ]
+        tasks = [invoke_tool(credentials, tc["tool"], tc["args"], tc["id"]) for tc in batch_tests]
         raw_results = await asyncio.gather(*tasks, return_exceptions=True)
         batch_time = time.time() - batch_start
         
         batch_results = []
         for i, res in enumerate(raw_results):
-            global_idx = batch_start_idx + i + 1
             if isinstance(res, Exception):
-                batch_results.append({"id": f"conc_{global_idx}", "success": False, "time": 0, "error": str(res)[:100]})
+                batch_results.append({"id": batch_tests[i]["id"], "success": False, "time": 0, "error": str(res)[:100]})
             else:
                 test_id, success, elapsed, error = res
                 batch_results.append({"id": test_id, "success": success, "time": elapsed, "error": error})
@@ -156,25 +163,18 @@ async def run_concurrent(credentials: Credentials, num_requests: int) -> Tuple[D
         stats = _compute_stats(batch_results)
         print(f"   ✅ {stats['successful']} successful, ❌ {stats['failed']} failed in {batch_time:.2f}s")
         
-        batch_summaries.append({
-            "batch": batch_idx + 1,
-            "batch_size": batch_size,
-            "batch_time": batch_time,
-            **stats,
-        })
-        
+        batch_summaries.append({"batch": batch_idx + 1, "batch_size": len(batch_tests), "batch_time": batch_time, **stats})
         all_results.extend(batch_results)
         
-        # Wait 2s between batches to avoid rate limit overlap
+        # Wait 1s between batches to avoid rate limit overlap
         if batch_idx < num_batches - 1:
-            print(f"   ⏳ Waiting 2s before next batch...")
-            await asyncio.sleep(2)
+            print(f"   ⏳ Waiting 1s before next batch...")
+            await asyncio.sleep(1)
     
     overall_time = time.time() - overall_start
     overall_stats = _compute_stats(all_results)
     
-    overall = {"mode": "Concurrent (batched)", "total_time": overall_time, **overall_stats}
-    return overall, batch_summaries
+    return {"mode": "Concurrent (batched)", "total_time": overall_time, **overall_stats}, batch_summaries
 
 
 def print_comparison(seq: Dict, conc: Dict, batch_summaries: List[Dict]):
@@ -219,7 +219,7 @@ def print_comparison(seq: Dict, conc: Dict, batch_summaries: List[Dict]):
 
 
 async def main():
-    print("🚀 Simple MCP Server: Sequential vs Concurrent Comparison")
+    print("🚀 Sequential vs Parallel Concurrency Comparison")
     print("=" * 60)
     
     # Ask user for iteration count
@@ -236,19 +236,31 @@ async def main():
     
     try:
         credentials = get_credentials()
+        tests = build_tests(num_tests)
         
         # Run sequential test
-        seq_result = await run_sequential(credentials, num_tests)
+        seq_result = await run_sequential(credentials, tests)
         
         # Run concurrent test (batched)
-        conc_result, batch_summaries = await run_concurrent(credentials, num_tests)
+        conc_result, batch_summaries = await run_concurrent(credentials, tests)
         
         # Print comparison with batch breakdown
         print_comparison(seq_result, conc_result, batch_summaries)
         
+        time_saved = seq_result["total_time"] - conc_result["total_time"]
+        
+        print(f"\n{'='*60}")
+        print("📋 SUMMARY")
+        print(f"{'='*60}")
+        print(f"""
+   Total Sequential Time: {seq_result['total_time']:.2f}s ({seq_result['total_time']/60:.2f} min)
+   Total Concurrent Time: {conc_result['total_time']:.2f}s ({conc_result['total_time']/60:.2f} min)
+   Total Time Saved:      {time_saved:.2f}s ({time_saved/60:.2f} min)
+""")
+        
         # Save results
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"simple_mcp_comparison_results_{timestamp}.json"
+        filename = f"long_running_mcp_comparison_results_{timestamp}.json"
         with open(filename, 'w') as f:
             json.dump({
                 "timestamp": datetime.now().isoformat(),
@@ -257,10 +269,7 @@ async def main():
                 "sequential": seq_result,
                 "concurrent": conc_result,
                 "batch_summaries": batch_summaries,
-                "summary": {
-                    "time_saved": seq_result["total_time"] - conc_result["total_time"],
-                    "speedup": seq_result["total_time"] / conc_result["total_time"] if conc_result["total_time"] > 0 else 0
-                }
+                "summary": {"time_saved": time_saved}
             }, f, indent=2)
         
         print(f"💾 Results saved to: {filename}")
@@ -269,6 +278,7 @@ async def main():
     except Exception as e:
         print(f"❌ Test failed: {e}")
         traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

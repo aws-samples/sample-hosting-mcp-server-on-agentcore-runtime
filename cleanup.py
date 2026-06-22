@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Cleanup script for MCP Server AgentCore Runtime deployments.
+Cleanup script for Long-Running MCP Server AgentCore Runtime deployments.
 
-Detects and removes all AWS resources created by the simple-mcp and
-long-running-mcp deployment scripts:
+Detects and removes all AWS resources created by the long-running-mcp
+deployment scripts (baseline and optimized):
   - AgentCore Runtime endpoints and agent runtimes
   - Cognito User Pools
   - Secrets Manager secrets
@@ -15,27 +15,31 @@ long-running-mcp deployment scripts:
 """
 
 import json
+import os
 import sys
 import time
 
 import boto3
 from boto3.session import Session
 
-# Deployment configurations keyed by server type
+# Deployment configurations for long-running MCP server variants
 DEPLOYMENTS = {
-    "simple-mcp": {
-        "agent_name": "mcp_server_agentcore",
-        "cognito_pool_name": "MCPServerPool",
-        "secrets": ["mcp_server/cognito/credentials", "mcp_server/deploy/credentials"],
-        "ssm_params": ["/mcp_server/runtime/agent_arn"],
-    },
-    "long-running-mcp": {
-        "agent_name": "long_running_mcp_server",
-        "cognito_pool_name": "LongRunningMCPServerPool",
-        "secrets": ["long_running_mcp_server/cognito/credentials", "long_running_mcp_server/deploy/credentials"],
+    "long-running-mcp-baseline": {
+        "agent_name": "long_running_mcp_server_baseline",
+        "cognito_pool_name": "LongRunningMCPServerPoolBaseline",
+        "secrets": ["long_running_mcp_server_baseline/cognito/credentials", "long_running_mcp_server_baseline/deploy/credentials"],
         "ssm_params": [
-            "/long_running_mcp_server/runtime/agent_arn",
-            "/long_running_mcp_server/metadata",
+            "/long_running_mcp_server_baseline/runtime/agent_arn",
+            "/long_running_mcp_server_baseline/metadata",
+        ],
+    },
+    "long-running-mcp-optimized": {
+        "agent_name": "long_running_mcp_server_optimized",
+        "cognito_pool_name": "LongRunningMCPServerPoolOptimized",
+        "secrets": ["long_running_mcp_server_optimized/cognito/credentials", "long_running_mcp_server_optimized/deploy/credentials"],
+        "ssm_params": [
+            "/long_running_mcp_server_optimized/runtime/agent_arn",
+            "/long_running_mcp_server_optimized/metadata",
         ],
     },
 }
@@ -255,6 +259,54 @@ def delete_workload_identity(agentcore_client, runtime_id):
         print(f"  - Workload Identity not found for: {runtime_id}")
 
 
+def reset_agentcore_yaml(agent_name):
+    """Reset .bedrock_agentcore.yaml to a clean state without stale agent IDs.
+
+    After cleanup deletes the runtime, the YAML still contains the old agent_id/arn.
+    The next deploy would try to 'update' a non-existent runtime and fail.
+    This writes a minimal config so the next deploy creates a fresh runtime.
+    """
+    # Map agent name to its directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    variant_dirs = {
+        "long_running_mcp_server_baseline": os.path.join(script_dir, "long-running-mcp", "baseline"),
+        "long_running_mcp_server_optimized": os.path.join(script_dir, "long-running-mcp", "optimized"),
+    }
+
+    variant_dir = variant_dirs.get(agent_name)
+    if not variant_dir:
+        print(f"  - Cannot determine config path for: {agent_name}")
+        return
+
+    yaml_path = os.path.join(variant_dir, ".bedrock_agentcore.yaml")
+    if not os.path.exists(yaml_path):
+        print(f"  - YAML not found: {yaml_path}")
+        return
+
+    # Write minimal clean config
+    clean_yaml = f"""default_agent: {agent_name}
+agents:
+  {agent_name}:
+    name: {agent_name}
+    entrypoint: long_running_mcp_server.py
+    platform: linux/arm64
+    container_runtime: none
+    aws:
+      region: us-east-1
+      network_configuration:
+        network_mode: PUBLIC
+      protocol_configuration:
+        server_protocol: MCP
+      observability:
+        enabled: true
+    memory:
+      mode: STM_ONLY
+"""
+    with open(yaml_path, "w") as f:
+        f.write(clean_yaml)
+    print(f"  ✓ Reset config: {yaml_path}")
+
+
 def cleanup_deployment(region, server_type, config):
     """Clean up all resources for a single deployment."""
     agent_name = config["agent_name"]
@@ -308,6 +360,10 @@ def cleanup_deployment(region, server_type, config):
     # 8. Workload Identity
     print("\n  [Workload Identity]")
     delete_workload_identity(agentcore_client, runtime_id)
+
+    # 9. Reset .bedrock_agentcore.yaml to remove stale agent IDs
+    print("\n  [Reset Config YAML]")
+    reset_agentcore_yaml(agent_name)
 
 
 def main():

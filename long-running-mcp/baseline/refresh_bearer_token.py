@@ -1,40 +1,39 @@
 #!/usr/bin/env python3
 """
-Bearer Token Refresh Utility for MCP Server
+Bearer Token Refresh Utility for Long-Running MCP Server
 
-This utility refreshes the Cognito bearer token and updates it in AWS Secrets Manager.
-The bearer token is used for authenticating with the MCP server deployed on AgentCore Runtime.
+This utility refreshes the Cognito bearer token for the long-running MCP server
+and updates it in AWS Secrets Manager. Extended token validity for long operations.
 
 Features:
 - Retrieves current Cognito configuration from Secrets Manager
 - Authenticates with Cognito to get a fresh bearer token
 - Updates the token in Secrets Manager
-- Validates the new token works with the MCP server
-- Supports both manual execution and scheduled automation
+- Validates the new token works with the long-running MCP server
+- Extended token validity for long-running operations
 - Comprehensive logging and error handling
 
 Usage:
     # Manual refresh
-    python refresh_bearer_token.py
+    python token_refresh.py
 
     # Check token expiry without refreshing
-    python refresh_bearer_token.py --check-only
+    python token_refresh.py --check-only
 
     # Refresh with validation
-    python refresh_bearer_token.py --validate
+    python token_refresh.py --validate
 
     # Scheduled execution (cron-friendly)
-    python refresh_bearer_token.py --quiet
+    python token_refresh.py --quiet
 
 Scheduling:
-    # Add to crontab for automatic refresh every 30 minutes
-    */30 * * * * /path/to/venv/bin/python /path/to/refresh_bearer_token.py --quiet
+    # Add to crontab for automatic refresh every 6 hours (for 12-hour tokens)
+    0 */6 * * * /path/to/venv/bin/python /path/to/token_refresh.py --quiet
 """
 
 import argparse
 import json
 import sys
-import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
@@ -42,23 +41,24 @@ import boto3
 from boto3.session import Session
 
 # Configuration constants
-SECRETS_MANAGER_SECRET_NAME = 'mcp_server/cognito/credentials'
-DEPLOY_CREDENTIALS_SECRET_NAME = 'mcp_server/deploy/credentials'
-SSM_PARAMETER_NAME = '/mcp_server/runtime/agent_arn'
-TOKEN_REFRESH_BUFFER_MINUTES = 5  # Refresh token 5 minutes before expiry
+SECRETS_MANAGER_SECRET_NAME = 'long_running_mcp_server_baseline/cognito/credentials'
+DEPLOY_CREDENTIALS_SECRET_NAME = 'long_running_mcp_server_baseline/deploy/credentials'
+SSM_PARAMETER_NAME = '/long_running_mcp_server_baseline/runtime/agent_arn'
+TOKEN_REFRESH_BUFFER_HOURS = 2  # Refresh token 2 hours before expiry (for 12-hour tokens)
 
 
-class TokenRefreshError(Exception):
+class LongRunningTokenRefreshError(Exception):
     """Custom exception for token refresh errors."""
     pass
 
 
-class CognitoTokenManager:
+class LongRunningCognitoTokenManager:
     """
-    Manages Cognito authentication tokens for MCP server access.
+    Manages Cognito authentication tokens for long-running MCP server access.
     
     This class handles the complete lifecycle of Cognito tokens including
-    retrieval of current configuration, authentication, and token updates.
+    retrieval of current configuration, authentication, and token updates
+    with extended validity for long-running operations.
     """
     
     def __init__(self, region: str, quiet: bool = False):
@@ -81,10 +81,10 @@ class CognitoTokenManager:
             Dict containing Cognito configuration including credentials
             
         Raises:
-            TokenRefreshError: If configuration cannot be retrieved
+            LongRunningTokenRefreshError: If configuration cannot be retrieved
         """
         try:
-            self.log("🔍 Retrieving current Cognito configuration...")
+            self.log("🔍 Retrieving current Cognito configuration for long-running MCP server...")
             
             response = self.secrets_client.get_secret_value(SecretId=SECRETS_MANAGER_SECRET_NAME)
             secret_value = response['SecretString']
@@ -94,17 +94,17 @@ class CognitoTokenManager:
             missing_keys = [key for key in required_keys if key not in config]
             
             if missing_keys:
-                raise TokenRefreshError(f"Missing required configuration keys: {missing_keys}")
+                raise LongRunningTokenRefreshError(f"Missing required configuration keys: {missing_keys}")
             
             self.log("✅ Successfully retrieved Cognito configuration")
             return config
             
         except self.secrets_client.exceptions.ResourceNotFoundException:
-            raise TokenRefreshError(f"Secrets Manager secret '{SECRETS_MANAGER_SECRET_NAME}' not found")
+            raise LongRunningTokenRefreshError(f"Secrets Manager secret '{SECRETS_MANAGER_SECRET_NAME}' not found")
         except json.JSONDecodeError as e:
-            raise TokenRefreshError(f"Invalid JSON in secrets: {e}")
+            raise LongRunningTokenRefreshError(f"Invalid JSON in secrets: {e}")
         except Exception as e:
-            raise TokenRefreshError(f"Failed to retrieve configuration: {e}")
+            raise LongRunningTokenRefreshError(f"Failed to retrieve configuration: {e}")
     
     def check_token_expiry(self, bearer_token: str) -> Tuple[bool, Optional[datetime]]:
         """
@@ -141,12 +141,12 @@ class CognitoTokenManager:
                 expiry_timestamp = token_data['exp']
                 expiry_time = datetime.fromtimestamp(expiry_timestamp)
                 
-                # Check if token expires within the buffer time
-                buffer_time = datetime.now() + timedelta(minutes=TOKEN_REFRESH_BUFFER_MINUTES)
+                # Check if token expires within the buffer time (2 hours for 12-hour tokens)
+                buffer_time = datetime.now() + timedelta(hours=TOKEN_REFRESH_BUFFER_HOURS)
                 needs_refresh = expiry_time <= buffer_time
                 
                 if needs_refresh:
-                    self.log(f"🕐 Token expires at {expiry_time}, refresh needed")
+                    self.log(f"🕐 Token expires at {expiry_time}, refresh needed (buffer: {TOKEN_REFRESH_BUFFER_HOURS}h)")
                 else:
                     self.log(f"✅ Token valid until {expiry_time}")
                 
@@ -167,13 +167,13 @@ class CognitoTokenManager:
             config: Cognito configuration dictionary
             
         Returns:
-            Fresh bearer token
+            Fresh bearer token with extended validity
             
         Raises:
-            TokenRefreshError: If authentication fails
+            LongRunningTokenRefreshError: If authentication fails
         """
         try:
-            self.log("🔐 Authenticating with Cognito to get fresh token...")
+            self.log("🔐 Authenticating with Cognito to get fresh token for long-running operations...")
             
             # Read credentials from the separate deploy credentials secret
             creds_response = self.secrets_client.get_secret_value(SecretId=DEPLOY_CREDENTIALS_SECRET_NAME)
@@ -191,19 +191,37 @@ class CognitoTokenManager:
             )
             
             if 'AuthenticationResult' not in auth_response:
-                raise TokenRefreshError("Authentication failed - no result returned")
+                raise LongRunningTokenRefreshError("Authentication failed - no result returned")
             
             new_token = auth_response['AuthenticationResult']['AccessToken']
+            
+            # Log token validity information
+            try:
+                import base64
+                parts = new_token.split('.')
+                if len(parts) == 3:
+                    payload = parts[1]
+                    padding = 4 - (len(payload) % 4)
+                    if padding != 4:
+                        payload += '=' * padding
+                    decoded_payload = base64.urlsafe_b64decode(payload)
+                    token_data = json.loads(decoded_payload)
+                    if 'exp' in token_data:
+                        expiry_time = datetime.fromtimestamp(token_data['exp'])
+                        validity_hours = (expiry_time - datetime.now()).total_seconds() / 3600
+                        self.log(f"✅ New token valid for {validity_hours:.1f} hours (until {expiry_time})")
+            except:
+                pass  # Skip token analysis if it fails
             
             self.log("✅ Successfully obtained fresh bearer token")
             return new_token
             
         except self.cognito_client.exceptions.NotAuthorizedException:
-            raise TokenRefreshError("Authentication failed - invalid credentials")
+            raise LongRunningTokenRefreshError("Authentication failed - invalid credentials")
         except self.cognito_client.exceptions.UserNotFoundException:
-            raise TokenRefreshError("Authentication failed - user not found")
+            raise LongRunningTokenRefreshError("Authentication failed - user not found")
         except Exception as e:
-            raise TokenRefreshError(f"Authentication failed: {e}")
+            raise LongRunningTokenRefreshError(f"Authentication failed: {e}")
     
     def update_token_in_secrets(self, config: Dict[str, str], new_token: str) -> None:
         """
@@ -214,7 +232,7 @@ class CognitoTokenManager:
             new_token: New bearer token to store
             
         Raises:
-            TokenRefreshError: If update fails
+            LongRunningTokenRefreshError: If update fails
         """
         try:
             self.log("💾 Updating bearer token in Secrets Manager...")
@@ -223,6 +241,7 @@ class CognitoTokenManager:
             updated_config = config.copy()
             updated_config['bearer_token'] = new_token
             updated_config['last_refreshed'] = datetime.now().isoformat()
+            updated_config['refresh_reason'] = 'scheduled_refresh_for_long_running_operations'
             
             # Store updated configuration
             self.secrets_client.update_secret(
@@ -233,11 +252,11 @@ class CognitoTokenManager:
             self.log("✅ Successfully updated bearer token in Secrets Manager")
             
         except Exception as e:
-            raise TokenRefreshError(f"Failed to update token in Secrets Manager: {e}")
+            raise LongRunningTokenRefreshError(f"Failed to update token in Secrets Manager: {e}")
     
     def validate_new_token(self, new_token: str) -> bool:
         """
-        Validate that the new token works by making a test request to the MCP server.
+        Validate that the new token works by making a test request to the long-running MCP server.
         
         Args:
             new_token: New bearer token to validate
@@ -246,7 +265,7 @@ class CognitoTokenManager:
             True if token is valid, False otherwise
         """
         try:
-            self.log("🧪 Validating new token with MCP server...")
+            self.log("🧪 Validating new token with long-running MCP server...")
             
             # Get the agent ARN for constructing the MCP URL
             ssm_client = boto3.client('ssm', region_name=self.region)
@@ -271,14 +290,19 @@ class CognitoTokenManager:
             
             async def test_connection():
                 try:
-                    timeout = timedelta(seconds=30)
+                    timeout = timedelta(seconds=60)  # Extended timeout for long-running server
+                    
                     async with streamablehttp_client(mcp_url, headers, timeout=timeout, terminate_on_close=False) as (
                         read_stream, write_stream, _
                     ):
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
                             # Try to list tools as a simple test
-                            await session.list_tools()
+                            tools_result = await session.list_tools()
+                            
+                            # Try to get server status for additional validation
+                            status_result = await session.call_tool(name="get_server_status", arguments={})
+                            
                             return True
                 except Exception as e:
                     self.log(f"⚠️ Token validation failed: {e}", "WARNING")
@@ -288,7 +312,7 @@ class CognitoTokenManager:
             result = asyncio.run(test_connection())
             
             if result:
-                self.log("✅ New token validated successfully")
+                self.log("✅ New token validated successfully with long-running MCP server")
             else:
                 self.log("❌ New token validation failed", "ERROR")
             
@@ -300,7 +324,7 @@ class CognitoTokenManager:
     
     def refresh_token(self, validate: bool = False) -> Dict[str, any]:
         """
-        Complete token refresh process.
+        Complete token refresh process for long-running operations.
         
         Args:
             validate: Whether to validate the new token with MCP server
@@ -309,7 +333,7 @@ class CognitoTokenManager:
             Dictionary with refresh results and metadata
             
         Raises:
-            TokenRefreshError: If refresh process fails
+            LongRunningTokenRefreshError: If refresh process fails
         """
         start_time = datetime.now()
         
@@ -336,7 +360,7 @@ class CognitoTokenManager:
             # Validate new token if requested
             if validate:
                 if not self.validate_new_token(new_token):
-                    raise TokenRefreshError("New token validation failed")
+                    raise LongRunningTokenRefreshError("New token validation failed")
             
             # Update token in Secrets Manager
             self.update_token_in_secrets(config, new_token)
@@ -352,7 +376,8 @@ class CognitoTokenManager:
                 'old_expiry': expiry_time.isoformat() if expiry_time else None,
                 'refresh_time': end_time.isoformat(),
                 'duration_seconds': duration,
-                'validated': validate
+                'validated': validate,
+                'server_type': 'long_running_computational'
             }
             
         except Exception as e:
@@ -362,7 +387,8 @@ class CognitoTokenManager:
             return {
                 'success': False,
                 'error': str(e),
-                'duration_seconds': duration
+                'duration_seconds': duration,
+                'server_type': 'long_running_computational'
             }
 
 
@@ -379,20 +405,20 @@ def get_aws_region() -> str:
 
 
 def main():
-    """Main function for token refresh utility."""
+    """Main function for long-running MCP server token refresh utility."""
     parser = argparse.ArgumentParser(
-        description="Refresh Cognito bearer token for MCP server authentication",
+        description="Refresh Cognito bearer token for long-running MCP server authentication",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python refresh_bearer_token.py                    # Refresh token
-  python refresh_bearer_token.py --check-only       # Check expiry only
-  python refresh_bearer_token.py --validate         # Refresh and validate
-  python refresh_bearer_token.py --quiet            # Silent mode for cron
+  python token_refresh.py                    # Refresh token
+  python token_refresh.py --check-only       # Check expiry only
+  python token_refresh.py --validate         # Refresh and validate
+  python token_refresh.py --quiet            # Silent mode for cron
   
-Scheduling:
-  # Add to crontab for automatic refresh every 30 minutes
-  */30 * * * * /path/to/venv/bin/python /path/to/refresh_bearer_token.py --quiet
+Scheduling for Long-Running Operations:
+  # Add to crontab for automatic refresh every 6 hours (for 12-hour tokens)
+  0 */6 * * * /path/to/venv/bin/python /path/to/token_refresh.py --quiet
         """
     )
     
@@ -405,7 +431,7 @@ Scheduling:
     parser.add_argument(
         '--validate',
         action='store_true',
-        help='Validate new token by testing MCP server connection'
+        help='Validate new token by testing long-running MCP server connection'
     )
     
     parser.add_argument(
@@ -427,12 +453,13 @@ Scheduling:
         region = get_aws_region()
         
         # Initialize token manager
-        token_manager = CognitoTokenManager(region, quiet=args.quiet)
+        token_manager = LongRunningCognitoTokenManager(region, quiet=args.quiet)
         
         if not args.quiet:
-            print("🔄 MCP Server Bearer Token Refresh Utility")
-            print("=" * 50)
+            print("🔄 Long-Running MCP Server Bearer Token Refresh Utility")
+            print("=" * 60)
             print(f"🌍 AWS Region: {region}")
+            print("⚡ Optimized for long-running computational operations")
         
         if args.check_only:
             # Only check token expiry
@@ -444,6 +471,8 @@ Scheduling:
                 if expiry_time:
                     print(f"🕐 Token expires: {expiry_time}")
                     print(f"🔄 Refresh needed: {'Yes' if needs_refresh else 'No'}")
+                    validity_hours = (expiry_time - datetime.now()).total_seconds() / 3600
+                    print(f"⏱️ Time remaining: {validity_hours:.1f} hours")
                 else:
                     print("⚠️ Could not determine token expiry")
             
@@ -452,21 +481,22 @@ Scheduling:
         # Perform token refresh
         if args.force:
             # Force refresh by temporarily modifying the check
-            original_buffer = TOKEN_REFRESH_BUFFER_MINUTES
-            import refresh_bearer_token
-            refresh_bearer_token.TOKEN_REFRESH_BUFFER_MINUTES = 999999  # Force refresh
+            original_buffer = TOKEN_REFRESH_BUFFER_HOURS
+            import token_refresh
+            token_refresh.TOKEN_REFRESH_BUFFER_HOURS = 999999  # Force refresh
         
         result = token_manager.refresh_token(validate=args.validate)
         
         if args.force:
             # Restore original buffer
-            refresh_bearer_token.TOKEN_REFRESH_BUFFER_MINUTES = original_buffer
+            token_refresh.TOKEN_REFRESH_BUFFER_HOURS = original_buffer
         
         if not args.quiet:
             print(f"\n📊 Refresh Results:")
             print(f"   Success: {'✅' if result['success'] else '❌'}")
             print(f"   Action: {result.get('action', 'unknown')}")
             print(f"   Duration: {result['duration_seconds']:.2f}s")
+            print(f"   Server Type: {result.get('server_type', 'unknown')}")
             
             if result['success'] and result.get('action') == 'token_refreshed':
                 print(f"   Validated: {'✅' if result.get('validated') else '⏭️ Skipped'}")
